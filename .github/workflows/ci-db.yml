@@ -1,0 +1,51 @@
+name: CI Base de datos
+
+on:
+  push:
+    branches: [ "develop", "main", "Develop" ]
+  pull_request:
+    branches: [ "develop", "main", "Develop" ]
+
+jobs:
+  test-db:
+    runs-on: ubuntu-latest
+
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        ports:
+          - 1433:1433
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validar archivos obligatorios
+        run: |
+          test -f Dockerfile || (echo "ERROR: Falta Dockerfile" && exit 1)
+          test -f .env.example || (echo "ERROR: Falta .env.example" && exit 1)
+          test -f README.md || (echo "ERROR: Falta README.md" && exit 1)
+
+      - name: Instalar cliente sqlcmd (Microsoft SQL Server Tools)
+        run: |
+          curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
+          curl https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/msprod.list
+          sudo apt-get update
+          ACCEPT_EULA=Y sudo apt-get install -y mssql-tools unixodbc-dev
+          echo '/opt/mssql-tools/bin' >> $GITHUB_PATH
+
+      - name: Probar ejecucion de scripts SQL
+        run: |
+          echo "Esperando que SQL Server termine de iniciar..."
+          sleep 15
+          
+          # Recorre todos los scripts .sql en orden alfabetico/numerico
+          for file in $(find . -name "*.sql" | sort); do
+            echo "Ejecutando script: $file"
+            /opt/mssql-tools/bin/sqlcmd -S localhost,1433 -U sa -P "${{ secrets.DB_PASSWORD }}" -i "$file" -b
+          done
+
+      - name: Validar compilacion de Dockerfile
+        run: docker build -t db-test .
