@@ -1,4 +1,4 @@
-name: CI Base de datos
+name: CI/CD Pipeline - Base de datos
 
 on:
   push:
@@ -7,6 +7,9 @@ on:
     branches: [ "develop", "main", "Develop" ]
 
 jobs:
+  
+  # 1. INTEGRACIÓN CONTINUA (CI) HECHO POR MARCOS GARCIA 
+
   test-db:
     runs-on: ubuntu-latest
 
@@ -20,7 +23,8 @@ jobs:
           - 1433:1433
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Descargar código
+        uses: actions/checkout@v4
 
       - name: Validar archivos obligatorios
         run: |
@@ -49,3 +53,63 @@ jobs:
 
       - name: Validar compilacion de Dockerfile
         run: docker build -t db-test .
+
+  
+  # 2. ESTOOOO ES DEL DESPLIEGUE CONTINUO - DESARROLLO (Ubuntu Server / Tailscale)
+  
+  deploy-dev:
+    name: Despliegue a Entorno de Desarrollo
+    needs: test-db
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/Develop')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v4
+
+      - name: Conectar a la VPN de Tailscale
+        uses: tailscale/github-action@v2
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+
+      - name: Desplegar SQL Server en Ubuntu Server vía SSH
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.DEV_SERVER_HOST }}
+          username: ${{ secrets.DEV_SERVER_USER }}
+          key: ${{ secrets.DEV_SERVER_SSH_KEY }}
+          script: |
+            cd /ruta/de/tu/proyecto/db
+            git pull origin Develop
+            docker build -t db-dev .
+            docker stop db-dev-container || true
+            docker rm db-dev-container || true
+            docker run -d --name db-dev-container -p 1433:1433 db-dev
+
+  
+  # 3. ESTOOOO ES DEL DESPLIEGUE CONTINUO - PRODUCCIÓN (Oracle Cloud)
+  deploy-prod:
+    name: Despliegue a Producción (OCI)
+    needs: test-db
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v4
+
+      - name: Desplegar SQL Server en Oracle Cloud vía SSH
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.PROD_SERVER_HOST }}
+          username: ${{ secrets.PROD_SERVER_USER }}
+          key: ${{ secrets.PROD_SERVER_SSH_KEY }}
+          script: |
+            cd /ruta/de/tu/proyecto/db
+            git pull origin main
+            docker build -t db-prod .
+            docker stop db-prod-container || true
+            docker rm db-prod-container || true
+            docker run -d --name db-prod-container -p 1433:1433 db-prod
