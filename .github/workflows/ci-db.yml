@@ -18,6 +18,7 @@ jobs:
       PWD_SAULT11: ${{ secrets.DB_PASSWORD_SAULT11 }}
       PWD_LIDERDBA1: ${{ secrets.DB_PASSWORD_LIDERDBA1 }}
       PWD_JUANLUIS2005: ${{ secrets.DB_PASSWORD_LIDERDBA1 }}
+      PWD_RODPIN24: ${{ secrets.DB_PASSWORD_LIDERDBA1 }}
     steps:
       - name: Descargar código
         uses: actions/checkout@v4
