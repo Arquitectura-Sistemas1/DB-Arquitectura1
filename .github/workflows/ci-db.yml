@@ -1,58 +1,159 @@
-name: CI/CD Pipeline - Base de datos
-
+name: CI/CD Pipeline - Base de datos (Oracle)
 on:
   push:
-    branches: [ "develop", "main", "Develop" ]
+    branches: [ "develop", "main" ]
   pull_request:
-    branches: [ "develop", "main", "Develop" ]
+    branches: [ "develop", "main" ]
+  workflow_dispatch:
+
+env:
+  CONTAINER_NAME: oracle-ci-${{ github.run_id }}
 
 jobs:
-  
-  # 1. INTEGRACIÓN CONTINUA (CI) HECHO POR MARCOS GARCIA 
-
   test-db:
     runs-on: self-hosted
-
-    services:
-      mssql:
-        image: mcr.microsoft.com/mssql/server:2022-latest
-        env:
-          ACCEPT_EULA: "Y"
-          MSSQL_SA_PASSWORD: ${{ secrets.DB_PASSWORD }}
-        ports:
-          - 1433:1433
-
+    env:
+      PWD_PIPVAN: ${{ secrets.DB_PASSWORD_PIPVAN }}
+      PWD_LIDERDBA2: ${{ secrets.DB_PASSWORD_LIDERDBA2 }}
+      PWD_SAULT11: ${{ secrets.DB_PASSWORD_SAULT11 }}
+      PWD_LIDERDBA1: ${{ secrets.DB_PASSWORD_LIDERDBA1 }}
+      PWD_JUANLUIS2005: ${{ secrets.DB_PASSWORD_LIDERDBA1 }}
     steps:
       - name: Descargar código
         uses: actions/checkout@v4
 
       - name: Validar archivos obligatorios
         run: |
+          set -euo pipefail
           test -f Dockerfile || (echo "ERROR: Falta Dockerfile" && exit 1)
           test -f .env.example || (echo "ERROR: Falta .env.example" && exit 1)
           test -f README.md || (echo "ERROR: Falta README.md" && exit 1)
 
-      - name: Instalar cliente sqlcmd (Microsoft SQL Server Tools)
-        run: |
-          curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
-          curl https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/msprod.list
-          sudo apt-get update
-          ACCEPT_EULA=Y sudo apt-get install -y mssql-tools unixodbc-dev
-          echo '/opt/mssql-tools/bin' >> $GITHUB_PATH
+      - name: Validar compilación de Dockerfile
+        run: docker build -t db-test .
 
-      - name: Probar ejecucion de scripts SQL
+      - name: Levantar contenedor de prueba Oracle XE
         run: |
-          echo "Esperando que SQL Server termine de iniciar..."
-          sleep 15
-          
-          # Recorre todos los scripts .sql en orden alfabetico/numerico
-          for file in $(find . -name "*.sql" | sort); do
-            echo "Ejecutando script: $file"
-            /opt/mssql-tools/bin/sqlcmd -S localhost,1433 -U sa -P "${{ secrets.DB_PASSWORD }}" -i "$file" -b
+          set -euo pipefail
+          docker run -d --name "$CONTAINER_NAME" \
+            -p 1521:1521 \
+            -e ORACLE_PASSWORD="${{ secrets.DB_PASSWORD }}" \
+            gvenzl/oracle-xe:21-slim
+
+      - name: Esperar disponibilidad de Oracle Database
+        run: |
+          set -euo pipefail
+          echo "Esperando que el motor Oracle responda en la PDB XEPDB1..."
+          MAX_INTENTOS=30
+          for i in $(seq 1 "$MAX_INTENTOS"); do
+            if docker exec "$CONTAINER_NAME" healthcheck.sh > /dev/null 2>&1; then
+              echo "Oracle Database está activo y listo."
+              exit 0
+            fi
+            echo "Intento $i/$MAX_INTENTOS: Oracle aún no está listo, esperando 10s..."
+            sleep 10
+          done
+          echo "ERROR: Oracle no respondió dentro del tiempo esperado."
+          docker logs "$CONTAINER_NAME"
+          exit 1
+
+      - name: Crear usuarios del equipo con privilegios DBA
+        run: |
+          set -euo pipefail
+
+          # Mapeo usuario -> nombre de variable con su password individual
+          declare -A USER_PWD_VAR=(
+            ["PipVan"]="PWD_PIPVAN"
+            ["liderdba2"]="PWD_LIDERDBA2"
+            ["saulT11"]="PWD_SAULT11"
+            ["liderdba1"]="PWD_LIDERDBA1"
+          )
+
+          for user in "${!USER_PWD_VAR[@]}"; do
+            varname="${USER_PWD_VAR[$user]}"
+            pwd_value="${!varname}"
+
+            if [ -z "$pwd_value" ]; then
+              echo "ERROR: No se encontró password para $user (revisa el secret $varname en el repo)"
+              exit 1
+            fi
+
+            echo "Creando usuario y asignando privilegios DBA para: $user"
+
+            docker exec -i -e ORAPWD="${{ secrets.DB_PASSWORD }}" -e USERPWD="$pwd_value" "$CONTAINER_NAME" \
+              sqlplus -s /nolog <<EOF
+          CONNECT system/&ORAPWD.@//localhost:1521/XEPDB1
+          ALTER SESSION SET CONTAINER = XEPDB1;
+
+          BEGIN
+            EXECUTE IMMEDIATE 'CREATE USER "$user" IDENTIFIED BY "&USERPWD."';
+          EXCEPTION
+            WHEN OTHERS THEN
+              IF SQLCODE != -01920 THEN
+                RAISE;
+              END IF;
+          END;
+          /
+          GRANT CONNECT, RESOURCE, DBA TO "$user";
+          ALTER USER "$user" QUOTA UNLIMITED ON USERS;
+          EXIT;
+          EOF
           done
 
-      - name: Validar compilacion de Dockerfile
-        run: docker build -t db-test .
+      - name: Validar autenticación e inicio de sesión de todos los usuarios
+        run: |
+          set -euo pipefail
+
+          declare -A USER_PWD_VAR=(
+            ["PipVan"]="PWD_PIPVAN"
+            ["liderdba2"]="PWD_LIDERDBA2"
+            ["saulT11"]="PWD_SAULT11"
+            ["liderdba1"]="PWD_LIDERDBA1"
+          )
+
+          for user in "${!USER_PWD_VAR[@]}"; do
+            varname="${USER_PWD_VAR[$user]}"
+            pwd_value="${!varname}"
+
+            echo "Verificando acceso para el usuario: $user"
+            output=$(docker exec -i -e USERPWD="$pwd_value" "$CONTAINER_NAME" \
+              sqlplus -s /nolog <<EOF
+          CONNECT "$user"/&USERPWD.@//localhost:1521/XEPDB1
+          SELECT 'Conexión exitosa para: ' || USER FROM DUAL;
+          EXIT;
+          EOF
+            )
+            echo "$output"
+            if echo "$output" | grep -qi "ORA-\|ERROR"; then
+              echo "ERROR: Falló la autenticación de $user"
+              exit 1
+            fi
+          done
+
+      - name: Ejecutar scripts SQL de la base de datos
+        run: |
+          set -euo pipefail
+          for file in $(find . -iname "*.sql" | sort); do
+            echo "Ejecutando script: $file"
+            output=$(docker exec -i -e USERPWD="$PWD_LIDERDBA1" "$CONTAINER_NAME" \
+              sqlplus -s /nolog <<EOF
+          CONNECT liderdba1/&USERPWD.@//localhost:1521/XEPDB1
+          @$file
+          EXIT;
+          EOF
+            )
+            echo "$output"
+            if echo "$output" | grep -q "ORA-"; then
+              echo "ERROR: Falló la ejecución de $file"
+              exit 1
+            fi
+          done
+
+      - name: Limpiar contenedor temporal
+        if: always()
+        run: |
+          docker stop "$CONTAINER_NAME" || true
+          docker rm "$CONTAINER_NAME" || true
 
   
   # 2. ESTOOOO ES DEL DESPLIEGUE CONTINUO - DESARROLLO (Ubuntu Server / Tailscale)
