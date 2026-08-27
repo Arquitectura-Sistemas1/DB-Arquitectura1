@@ -1,217 +1,279 @@
-name: CI/CD Pipeline - Base de datos (Oracle)
+name: CI/CD - Oracle Database Pipeline
+
 on:
   push:
-    branches: [ "develop", "main" ]
+    branches:
+      - develop
+      - Develop
+      - main
   pull_request:
-    branches: [ "develop", "main" ]
+    branches:
+      - develop
+      - Develop
+      - main
   workflow_dispatch:
 
-env:
-  CONTAINER_NAME: oracle-ci-${{ github.run_id }}
-
 jobs:
+
+  # JOB 1: Integración Continua
+  
   test-db:
-    runs-on: ubuntu-latest
-    env:
-      PWD_PIPVAN: ${{ secrets.DB_PASSWORD_PIPVAN }}
-      PWD_LIDERDBA2: ${{ secrets.DB_PASSWORD_LIDERDBA2 }}
-      PWD_SAULT11: ${{ secrets.DB_PASSWORD_SAULT11 }}
-      PWD_LIDERDBA1: ${{ secrets.DB_PASSWORD_LIDERDBA1 }}
-      PWD_JUANLUIS2005: ${{ secrets.DB_PASSWORD_LIDERDBA1 }}
-      PWD_RODPIN24: ${{ secrets.DB_PASSWORD_LIDERDBA1 }}
+    name: Integración Continua (test-db)
+    runs-on: self-hosted
+
     steps:
-      - name: Descargar código
+      - name: Checkout del código
         uses: actions/checkout@v4
 
-      - name: Validar archivos obligatorios
+      - name: Validar archivos requeridos del proyecto
         run: |
-          set -euo pipefail
-          test -f Dockerfile || (echo "ERROR: Falta Dockerfile" && exit 1)
-          test -f .env.example || (echo "ERROR: Falta .env.example" && exit 1)
-          test -f README.md || (echo "ERROR: Falta README.md" && exit 1)
+          set -e
+          echo "Validando archivos requeridos..."
+          for file in Dockerfile .env.example README.md; do
+            if [ ! -f "$file" ]; then
+              echo "ERROR: No se encontró el archivo requerido '$file'."
+              exit 1
+            else
+              echo "OK: '$file' encontrado."
+            fi
+          done
 
-      - name: Validar compilación de Dockerfile
+      - name: Compilar imagen Docker (db-test)
         run: docker build -t db-test .
 
-      - name: Levantar contenedor de prueba Oracle XE
+      - name: Levantar contenedor efímero de Oracle XE
         run: |
-          set -euo pipefail
-          docker run -d --name "$CONTAINER_NAME" \
+          docker run -d \
+            --name oracle-test-container-${{ github.run_id }} \
             -p 1521:1521 \
-            -e ORACLE_PASSWORD="${{ secrets.DB_PASSWORD }}" \
+            -e ORACLE_PASSWORD="${{ secrets.DB_PASSWORD_SYS }}" \
             gvenzl/oracle-xe:21-slim
 
-      - name: Esperar disponibilidad de Oracle Database
+      - name: Esperar a que la PDB XEPDB1 esté activa
         run: |
-          set -euo pipefail
-          echo "Esperando que el motor Oracle responda en la PDB XEPDB1..."
+          set -e
           MAX_INTENTOS=30
-          for i in $(seq 1 "$MAX_INTENTOS"); do
-            if docker exec "$CONTAINER_NAME" healthcheck.sh > /dev/null 2>&1; then
-              echo "Oracle Database está activo y listo."
+          ESPERA=10
+          INTENTO=1
+
+          echo "Esperando a que la base de datos Oracle esté disponible (máx. $MAX_INTENTOS intentos)..."
+
+          while [ $INTENTO -le $MAX_INTENTOS ]; do
+            echo "Intento $INTENTO de $MAX_INTENTOS..."
+
+            if docker exec oracle-test-container-${{ github.run_id }} healthcheck.sh | grep -q "database is ready to use"; then
+              echo "La PDB XEPDB1 está activa y lista para usarse."
               exit 0
             fi
-            echo "Intento $i/$MAX_INTENTOS: Oracle aún no está listo, esperando 10s..."
-            sleep 10
+
+            INTENTO=$((INTENTO + 1))
+            sleep $ESPERA
           done
-          echo "ERROR: Oracle no respondió dentro del tiempo esperado."
-          docker logs "$CONTAINER_NAME"
+
+          echo "ERROR: Se agotaron los intentos. La base de datos no estuvo lista a tiempo."
+          docker logs oracle-test-container-${{ github.run_id }}
           exit 1
 
-      - name: Crear usuarios del equipo con privilegios DBA
+      - name: Crear usuarios DBA dinámicamente
+        env:
+          PWD_PIPVAN: ${{ secrets.DB_PASSWORD_PIPVAN }}
+          PWD_LIDERDBA2: ${{ secrets.DB_PASSWORD_LIDERDBA2 }}
+          PWD_SAULT11: ${{ secrets.DB_PASSWORD_SAULT11 }}
+          PWD_LIDERDBA1: ${{ secrets.DB_PASSWORD_LIDERDBA1 }}
+          PWD_JUANLUIS2005: ${{ secrets.DB_PASSWORD_JUANLUIS2005 }}
         run: |
-          set -euo pipefail
+          set -e
 
-          # Mapeo usuario -> nombre de variable con su password individual
-          declare -A USER_PWD_VAR=(
-            ["PipVan"]="PWD_PIPVAN"
-            ["liderdba2"]="PWD_LIDERDBA2"
-            ["saulT11"]="PWD_SAULT11"
-            ["liderdba1"]="PWD_LIDERDBA1"
+          declare -A USER_MAP=(
+            ["PipVan"]="$PWD_PIPVAN"
+            ["liderdba2"]="$PWD_LIDERDBA2"
+            ["saulT11"]="$PWD_SAULT11"
+            ["liderdba1"]="$PWD_LIDERDBA1"
+            ["juanluis2005"]="$PWD_JUANLUIS2005"
           )
 
-          for user in "${!USER_PWD_VAR[@]}"; do
-            varname="${USER_PWD_VAR[$user]}"
-            pwd_value="${!varname}"
+          for USUARIO in "${!USER_MAP[@]}"; do
+            PASSWORD="${USER_MAP[$USUARIO]}"
 
-            if [ -z "$pwd_value" ]; then
-              echo "ERROR: No se encontró password para $user (revisa el secret $varname en el repo)"
+            if [ -z "$PASSWORD" ]; then
+              echo "ERROR: No se encontró la contraseña para el usuario '$USUARIO'."
               exit 1
             fi
 
-            echo "Creando usuario y asignando privilegios DBA para: $user"
+            echo "Creando usuario DBA: $USUARIO..."
 
-            docker exec -i -e ORAPWD="${{ secrets.DB_PASSWORD }}" -e USERPWD="$pwd_value" "$CONTAINER_NAME" \
-              sqlplus -s /nolog <<EOF
-          CONNECT system/&ORAPWD.@//localhost:1521/XEPDB1
-          ALTER SESSION SET CONTAINER = XEPDB1;
-
-          BEGIN
-            EXECUTE IMMEDIATE 'CREATE USER "$user" IDENTIFIED BY "&USERPWD."';
-          EXCEPTION
-            WHEN OTHERS THEN
-              IF SQLCODE != -01920 THEN
-                RAISE;
-              END IF;
-          END;
-          /
-          GRANT CONNECT, RESOURCE, DBA TO "$user";
-          ALTER USER "$user" QUOTA UNLIMITED ON USERS;
+            docker exec oracle-test-container-${{ github.run_id }} sqlplus -s sys/${{ secrets.DB_PASSWORD_SYS }}@//localhost:1521/XEPDB1 as sysdba <<EOF
+          WHENEVER SQLERROR EXIT SQL.SQLCODE
+          CREATE USER ${USUARIO} IDENTIFIED BY "${PASSWORD}";
+          GRANT DBA TO ${USUARIO};
           EXIT;
           EOF
-          done
-
-      - name: Validar autenticación e inicio de sesión de todos los usuarios
+          
+                      echo "Usuario '$USUARIO' creado correctamente."
+                    done
+          
+                - name: Validar login de cada usuario
+                  env:
+          PWD_PIPVAN: ${{ secrets.DB_PASSWORD_PIPVAN }}
+          PWD_LIDERDBA2: ${{ secrets.DB_PASSWORD_LIDERDBA2 }}
+          PWD_SAULT11: ${{ secrets.DB_PASSWORD_SAULT11 }}
+          PWD_LIDERDBA1: ${{ secrets.DB_PASSWORD_LIDERDBA1 }}
+          PWD_JUANLUIS2005: ${{ secrets.DB_PASSWORD_JUANLUIS2005 }}
         run: |
-          set -euo pipefail
+          set -e
 
-          declare -A USER_PWD_VAR=(
-            ["PipVan"]="PWD_PIPVAN"
-            ["liderdba2"]="PWD_LIDERDBA2"
-            ["saulT11"]="PWD_SAULT11"
-            ["liderdba1"]="PWD_LIDERDBA1"
+          declare -A USER_MAP=(
+            ["PipVan"]="$PWD_PIPVAN"
+            ["liderdba2"]="$PWD_LIDERDBA2"
+            ["saulT11"]="$PWD_SAULT11"
+            ["liderdba1"]="$PWD_LIDERDBA1"
+            ["juanluis2005"]="$PWD_JUANLUIS2005"
           )
 
-          for user in "${!USER_PWD_VAR[@]}"; do
-            varname="${USER_PWD_VAR[$user]}"
-            pwd_value="${!varname}"
+          for USUARIO in "${!USER_MAP[@]}"; do
+            PASSWORD="${USER_MAP[$USUARIO]}"
 
-            echo "Verificando acceso para el usuario: $user"
-            output=$(docker exec -i -e USERPWD="$pwd_value" "$CONTAINER_NAME" \
-              sqlplus -s /nolog <<EOF
-          CONNECT "$user"/&USERPWD.@//localhost:1521/XEPDB1
-          SELECT 'Conexión exitosa para: ' || USER FROM DUAL;
+            echo "Validando login del usuario: $USUARIO..."
+
+            RESULTADO=$(docker exec oracle-test-container-${{ github.run_id }} sqlplus -s ${USUARIO}/"${PASSWORD}"@//localhost:1521/XEPDB1 <<EOF
+          SELECT 'LOGIN_OK' FROM DUAL;
           EXIT;
           EOF
-            )
-            echo "$output"
-            if echo "$output" | grep -qi "ORA-\|ERROR"; then
-              echo "ERROR: Falló la autenticación de $user"
-              exit 1
-            fi
-          done
-
-      - name: Ejecutar scripts SQL de la base de datos
+          )
+                      if echo "$RESULTADO" | grep -q "LOGIN_OK"; then
+                        echo "Login exitoso para el usuario '$USUARIO'."
+                      else
+                        echo "ERROR: Falló el login para el usuario '$USUARIO'."
+                        exit 1
+                      fi
+                    done
+          
+                - name: Ejecutar scripts SQL con liderdba1
+                  env:
+          DB_PASSWORD_LIDERDBA1: ${{ secrets.DB_PASSWORD_LIDERDBA1 }}
         run: |
-          set -euo pipefail
-          for file in $(find . -iname "*.sql" | sort); do
-            echo "Ejecutando script: $file"
-            output=$(docker exec -i -e USERPWD="$PWD_LIDERDBA1" "$CONTAINER_NAME" \
-              sqlplus -s /nolog <<EOF
-          CONNECT liderdba1/&USERPWD.@//localhost:1521/XEPDB1
-          @$file
+          set -e
+
+          SQL_FILES=$(find . -maxdepth 1 -type f -name "*.sql")
+
+          if [ -z "$SQL_FILES" ]; then
+            echo "No se encontraron scripts .sql en la raíz del proyecto. Se omite este paso."
+            exit 0
+          fi
+
+          for SCRIPT in $SQL_FILES; do
+            NOMBRE_SCRIPT=$(basename "$SCRIPT")
+            echo "Ejecutando script: $NOMBRE_SCRIPT..."
+
+            docker cp "$SCRIPT" oracle-test-container-${{ github.run_id }}:/tmp/"$NOMBRE_SCRIPT"
+
+            docker exec oracle-test-container-${{ github.run_id }} sqlplus -s liderdba1/"${DB_PASSWORD_LIDERDBA1}"@//localhost:1521/XEPDB1 <<EOF
+          WHENEVER SQLERROR EXIT SQL.SQLCODE
+          @/tmp/${NOMBRE_SCRIPT}
           EXIT;
           EOF
-            )
-            echo "$output"
-            if echo "$output" | grep -q "ORA-"; then
-              echo "ERROR: Falló la ejecución de $file"
-              exit 1
-            fi
-          done
+          
+                      echo "Script '$NOMBRE_SCRIPT' ejecutado correctamente."
+                    done
+          
+                - name: Limpieza del contenedor temporal
+                  if: always()
+                  run: |
+          echo "Deteniendo y eliminando el contenedor de pruebas..."
+          docker stop oracle-test-container-${{ github.run_id }} || true
+          docker rm oracle-test-container-${{ github.run_id }} || true
 
-      - name: Limpiar contenedor temporal
-        if: always()
-        run: |
-          docker stop "$CONTAINER_NAME" || true
-          docker rm "$CONTAINER_NAME" || true
+  # JOB 2: Despliegue a Desarrollo
 
-  
-  # 2. ESTOOOO ES DEL DESPLIEGUE CONTINUO - DESARROLLO (Ubuntu Server / Tailscale)
-  
   deploy-dev:
-    name: Despliegue a Entorno de Desarrollo
+    name: Despliegue a Desarrollo (deploy-dev)
+    runs-on: self-hosted
     needs: test-db
     if: github.event_name == 'push' && (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/Develop')
-    runs-on: ubuntu-latest
 
     steps:
-      - name: Descargar código
-        uses: actions/checkout@v4
-
-      - name: Conectar a la VPN de Tailscale
-        uses: tailscale/github-action@v2
+      - name: Conectar a Tailscale
+        uses: tailscale/github-action@v3
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci
 
-      - name: Desplegar SQL Server en Ubuntu Server vía SSH
-        uses: appleboy/ssh-action@v1.0.0
-        with:
-          host: ${{ secrets.DEV_SERVER_HOST }}
-          username: ${{ secrets.DEV_SERVER_USER }}
-          key: ${{ secrets.DEV_SERVER_SSH_KEY }}
-          script: |
-            cd /ruta/de/tu/proyecto/db
-            git pull origin Develop
+      - name: Configurar clave SSH privada
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEV_SERVER_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+      - name: Configurar SSH config para túnel vía Tailscale
+        run: |
+          cat >> ~/.ssh/config <<EOF
+          Host dev-server
+            HostName ${{ secrets.DEV_SERVER_HOST }}
+            User ${{ secrets.DEV_SERVER_USER }}
+            IdentityFile ~/.ssh/id_ed25519
+            ProxyCommand tailscale nc %h %p
+            StrictHostKeyChecking no
+            UserKnownHostsFile=/dev/null
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Desplegar en servidor de Desarrollo vía SSH
+        run: |
+          ssh dev-server << ENDSSH
+            set -e
+            cd /home/Brxckin/DB-Arquitectura1
+
+            echo "Actualizando código desde la rama ${{ github.ref_name }}..."
+            git pull origin ${{ github.ref_name }}
+
+            echo "Compilando imagen db-dev..."
             docker build -t db-dev .
+
+            echo "Deteniendo y eliminando contenedor anterior (si existe)..."
             docker stop db-dev-container || true
             docker rm db-dev-container || true
-            docker run -d --name db-dev-container -p 1433:1433 db-dev
 
-  
-  # 3. ESTOOOO ES DEL DESPLIEGUE CONTINUO - PRODUCCIÓN (Oracle Cloud)
+            echo "Levantando nuevo contenedor db-dev-container..."
+            docker run -d \
+              --name db-dev-container \
+              -p 1521:1521 \
+              --env-file .env \
+              db-dev
+
+            echo "Despliegue a Desarrollo completado."
+          ENDSSH
+
+  # JOB 3: Despliegue a Producción
+
   deploy-prod:
-    name: Despliegue a Producción (OCI)
+    name: Despliegue a Producción (deploy-prod)
+    runs-on: self-hosted
     needs: test-db
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
 
     steps:
-      - name: Descargar código
-        uses: actions/checkout@v4
+      - name: Desplegar en servidor de Producción (ejecución local en el runner)
+        run: |
+          set -e
+          cd /home/Brxckin/DB-Arquitectura1
 
-      - name: Desplegar SQL Server en Oracle Cloud vía SSH
-        uses: appleboy/ssh-action@v1.0.0
-        with:
-          host: ${{ secrets.PROD_SERVER_HOST }}
-          username: ${{ secrets.PROD_SERVER_USER }}
-          key: ${{ secrets.PROD_SERVER_SSH_KEY }}
-          script: |
-            cd /ruta/de/tu/proyecto/db
-            git pull origin main
-            docker build -t db-prod .
-            docker stop db-prod-container || true
-            docker rm db-prod-container || true
-            docker run -d --name db-prod-container -p 1433:1433 db-prod
+          echo "Actualizando código desde el repositorio (main)..."
+          git pull origin main
+
+          echo "Compilando imagen db-prod..."
+          docker build -t db-prod .
+
+          echo "Deteniendo y eliminando contenedor anterior (si existe)..."
+          docker stop db-prod-container || true
+          docker rm db-prod-container || true
+
+          echo "Levantando nuevo contenedor db-prod-container..."
+          docker run -d \
+            --name db-prod-container \
+            --restart always \
+            -p 1521:1521 \
+            --env-file .env \
+            db-prod
+
+          echo "Despliegue a Producción completado."
