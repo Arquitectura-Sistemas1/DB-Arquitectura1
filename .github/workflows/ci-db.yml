@@ -11,7 +11,7 @@ env:
 
 jobs:
   test-db:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     env:
       PWD_PIPVAN: ${{ secrets.DB_PASSWORD_PIPVAN }}
       PWD_LIDERDBA2: ${{ secrets.DB_PASSWORD_LIDERDBA2 }}
