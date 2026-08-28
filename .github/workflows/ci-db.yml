@@ -139,7 +139,7 @@ jobs:
         run: |
           ssh dev-server ENDSSH
             set -e
-            cd /home/Brxckin/DB-Arquitectura1
+            cd /home/PipVan/DB-Arquitectura1
 
             echo "Actualizando código desde la rama ${{ github.ref_name }}..."
             git pull origin ${{ github.ref_name }}
