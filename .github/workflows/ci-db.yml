@@ -162,7 +162,7 @@ jobs:
       - name: Desplegar en servidor de Producción
         run: |
           set -e
-          cd /home/Brxckin/DB-Arquitectura1
+          cd /home/PipVan/DB-Arquitectura1
 
           echo "Actualizando código desde la rama main..."
           git pull origin main
