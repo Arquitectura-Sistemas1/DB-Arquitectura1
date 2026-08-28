@@ -1,0 +1,31 @@
+services:
+  sqlserver:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tienda-videojuegos-sqlserver
+    restart: unless-stopped
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: "Developer"
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD}"
+      DB_NAME: "TiendaVideojuegos"
+      LOAD_DEMO_DATA: "${LOAD_DEMO_DATA:-false}"
+    ports:
+      - "${SQLSERVER_PORT:-1433}:1433"
+    volumes:
+      - tienda_videojuegos_data:/var/opt/mssql
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q \"SELECT 1\" >/dev/null 2>&1 || exit 1"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  tienda_videojuegos_data:
+    name: tienda_videojuegos_data
